@@ -1,0 +1,7 @@
+{
+  "name": "VibeNote AI",
+  "description": "Real-time intelligent transcription and note organization using Gemini Live API. Captures Microphone and System Audio to generate structured insights.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

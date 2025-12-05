@@ -5,11 +5,24 @@ import { createBlob, decode, decodeAudioData, downsampleTo16k } from '../service
 
 export interface UseGeminiLiveProps {
   apiKey: string | undefined;
+  /** Whether to capture and stream system audio (if supported) */
   systemAudioEnabled: boolean;
+  /** Whether the AI's voice response should be played back */
   talkbackEnabled: boolean;
+  /** Audio quality configuration */
   audioConfig: AudioConfig;
 }
 
+/**
+ * A comprehensive hook that manages the Gemini Live API session.
+ * 
+ * Responsibilities:
+ * 1. Manages WebSocket connection state (connect/disconnect/reconnect).
+ * 2. Sets up the Web Audio API graph (Microphone -> Processing -> API).
+ * 3. Applies a professional "Vocal Chain" (EQ, Compressor, Gate) to input.
+ * 4. Handles real-time audio streaming and transcript buffering.
+ * 5. Manages audio playback of the model's response.
+ */
 export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, audioConfig }: UseGeminiLiveProps) => {
   const [status, setStatus] = useState<StreamStatus>(StreamStatus.DISCONNECTED);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
@@ -17,11 +30,15 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isMicOn, setIsMicOn] = useState(true);
+  
+  // State to track if the system is currently trying to recover from a dropped connection
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
   // Buffer Debounce Refs
   const bufferAccumulatorRef = useRef("");
   const bufferDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Audio Context & Pipeline Refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const systemStreamRef = useRef<MediaStream | null>(null);
@@ -37,6 +54,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
   const talkbackRef = useRef(talkbackEnabled);
   
   // Strict flag to control data flow. 
+  // Prevents sending data to a closed socket during race conditions.
   const isLiveRef = useRef(false);
   // Flag to track if we should auto-reconnect on error/close
   const shouldReconnectRef = useRef(false);
@@ -50,7 +68,10 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     talkbackRef.current = talkbackEnabled;
   }, [talkbackEnabled]);
   
-  // Debounced update function for transcript buffer
+  /**
+   * Batches incoming text chunks to prevent excessive React state updates.
+   * Flushes to state every 200ms.
+   */
   const queueTranscriptUpdate = useCallback((text: string) => {
     bufferAccumulatorRef.current += " " + text;
 
@@ -66,6 +87,9 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     }
   }, []);
 
+  /**
+   * Mutes/Unmutes the microphone track without stopping the stream.
+   */
   const toggleMic = useCallback(() => {
     setIsMicOn(prev => {
       const newState = !prev;
@@ -82,6 +106,10 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
       // Logic handled via ref in onmessage
   }, []);
 
+  /**
+   * Allows the user to manually send text input to the model.
+   * Useful for corrections or if the microphone is unavailable.
+   */
   const sendTextMessage = useCallback((text: string) => {
      if (!text.trim()) return;
      
@@ -103,6 +131,10 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
      }
   }, [queueTranscriptUpdate]);
 
+  /**
+   * Gracefully shuts down the entire audio pipeline and WebSocket.
+   * Releases all hardware resources.
+   */
   const stopAudioPipeline = useCallback(() => {
     isLiveRef.current = false; // Immediately stop sending data
 
@@ -151,9 +183,14 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     setAnalyser(null);
   }, []);
 
+  /**
+   * Manually disconnects the session (User interaction).
+   * Disables auto-reconnection logic.
+   */
   const disconnect = useCallback(() => {
     shouldReconnectRef.current = false; // User explicitly stopped, do not reconnect
     isLiveRef.current = false;
+    setIsReconnecting(false);
     
     if (sessionRef.current) {
       try {
@@ -181,6 +218,9 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     };
   }, [disconnect]);
 
+  /**
+   * Main function to establish the connection and start the session.
+   */
   const connect = useCallback(async () => {
     if (!apiKey) {
       setErrorMessage("API Key is missing.");
@@ -195,7 +235,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     setStatus(StreamStatus.CONNECTING);
 
     try {
-      // 1. Initialize AudioContext IMMEDIATELY
+      // 1. Initialize AudioContext IMMEDIATELY (to satisfy browser autoplay policies)
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ 
         latencyHint: configRef.current.latencyMode 
@@ -206,14 +246,14 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
       }
       audioContextRef.current = ctx;
 
-      // 2. Setup Audio Inputs (Microphone) with Speech Optimization
+      // 2. Setup Audio Inputs (Microphone) with Speech Optimization constraints
       const micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
           autoGainControl: true,
           noiseSuppression: true,
-          // @ts-ignore - Experimental constraint for better voice isolation
+          // @ts-ignore - Experimental constraint for better voice isolation on supported devices
           voiceIsolation: true 
         }
       });
@@ -256,6 +296,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
             }
             console.log("Gemini Live Connected");
             setStatus(StreamStatus.CONNECTED);
+            setIsReconnecting(false); // Clear reconnecting flag on success
           },
           onmessage: async (msg: LiveServerMessage) => {
             try {
@@ -265,11 +306,13 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
                 const text = inputTranscript.text;
                 setSegments(prev => {
                   const last = prev[prev.length - 1];
+                  // Append to partial segment if it exists
                   if (last && last.sender === 'user' && last.isPartial) {
                     const updated = [...prev];
                     updated[updated.length - 1] = { ...last, text: last.text + text };
                     return updated;
                   }
+                  // Start new segment
                   return [...prev, { id: Date.now().toString(), sender: 'user', text, timestamp: new Date(), isPartial: true }];
                 });
                 queueTranscriptUpdate(text);
@@ -335,10 +378,13 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
                 // Auto-retry logic: don't show error UI, just try to reconnect
                 console.log("Connection dropped while active. Initiating auto-reconnect...");
                 shouldReconnectRef.current = true;
+                setIsReconnecting(true);
+                // Keep status as CONNECTING or transition to it to show retry UI
                 setStatus(StreamStatus.CONNECTING);
                 
                 stopAudioPipeline();
                 
+                // Exponential backoff or simple delay
                 setTimeout(() => {
                     console.log("Reconnecting now...");
                     connect();
@@ -366,35 +412,36 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
       sourceRef.current = micSource;
 
       // --- Professional Vocal Chain ---
-      // 1. High-Pass Filter (Low Cut)
+      // 1. High-Pass Filter (Low Cut) - Removes rumble/desk bumps (<85Hz)
       const highPass = ctx.createBiquadFilter();
       highPass.type = 'highpass';
       highPass.frequency.value = 85; 
 
-      // 2. Parametric EQ (Presence Boost)
+      // 2. Parametric EQ (Presence Boost) - Adds clarity for speech (~3kHz)
       const midBoost = ctx.createBiquadFilter();
       midBoost.type = 'peaking';
       midBoost.frequency.value = 3000;
       midBoost.Q.value = 1.0;
       midBoost.gain.value = 3; // +3dB
 
-      // 3. Low-Pass Filter (High Cut)
+      // 3. Low-Pass Filter (High Cut) - Removes hiss/sibilance (>6kHz)
       const lowPass = ctx.createBiquadFilter();
       lowPass.type = 'lowpass';
       lowPass.frequency.value = 6000; 
 
-      // 4. Dynamics Compressor (Normalization)
+      // 4. Dynamics Compressor (Normalization) - Evens out volume levels
       const compressor = ctx.createDynamicsCompressor();
       compressor.threshold.value = -20;
       compressor.knee.value = 30;
-      compressor.ratio.value = 12;
+      compressor.ratio.value = 12; // High ratio for voice leveling
       compressor.attack.value = 0.003;
       compressor.release.value = 0.25;
 
-      // 5. Makeup Gain
+      // 5. Makeup Gain - Boosts the signal after compression
       const makeupGain = ctx.createGain();
       makeupGain.gain.value = 1.5;
 
+      // Chain Connections
       micSource.connect(highPass);
       highPass.connect(midBoost);
       midBoost.connect(lowPass);
@@ -403,6 +450,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
 
       let finalSource: AudioNode = makeupGain; 
 
+      // Mix in system audio if enabled
       if (sysStream && sysStream.getAudioTracks().length > 0) {
         const sysSource = ctx.createMediaStreamSource(sysStream);
         systemSourceRef.current = sysSource;
@@ -412,8 +460,10 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
         finalSource = mixNode;
       }
 
+      // Connect to Analyser for Visualizer
       finalSource.connect(analyserNode);
 
+      // ScriptProcessor for raw PCM access (deprecated but reliable for this use case)
       const processor = ctx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
@@ -421,6 +471,8 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
         if (!isLiveRef.current || !processorRef.current || !audioContextRef.current) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
+        
+        // --- Noise Gate ---
         let sumSquares = 0;
         for (let i = 0; i < inputData.length; i++) {
            sumSquares += inputData[i] * inputData[i];
@@ -428,13 +480,16 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
         const rms = Math.sqrt(sumSquares / inputData.length);
         const threshold = configRef.current.noiseGateThreshold;
         
+        // If below threshold, silence the buffer
         if (rms < threshold) {
              inputData.fill(0);
         }
 
+        // --- Downsampling ---
         const downsampledData = downsampleTo16k(inputData, effectiveSampleRate);
         const pcmBlob = createBlob(downsampledData);
 
+        // --- Send to API ---
         sessionPromise.then((session) => {
           if (!isLiveRef.current) return;
           try {
@@ -448,6 +503,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
       };
 
       finalSource.connect(processor);
+      // Processor must be connected to destination to run, even if we don't want to hear it
       processor.connect(ctx.destination);
 
     } catch (e) {
@@ -468,6 +524,7 @@ export const useGeminiLive = ({ apiKey, systemAudioEnabled, talkbackEnabled, aud
     currentTranscriptBuffer,
     analyser,
     errorMessage,
+    isReconnecting,
     connect,
     disconnect,
     setCurrentTranscriptBuffer,

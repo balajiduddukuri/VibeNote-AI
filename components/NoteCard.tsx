@@ -3,10 +3,18 @@ import { OrganizedNote } from '../types';
 import { CheckSquare, Hash, Lightbulb, Clock } from 'lucide-react';
 
 interface NoteCardProps {
+  /** The data object containing the structured note content */
   note: OrganizedNote;
+  /** Enables accessible high-contrast styling */
   highContrast?: boolean;
 }
 
+/**
+ * Displays a single analyzed session note with structured sections for
+ * Summary, Action Items, Decisions, and Topics.
+ * 
+ * Uses semantic HTML (article, header, section, ul) for screen reader accessibility.
+ */
 const NoteCard: React.FC<NoteCardProps> = ({ note, highContrast = false }) => {
   const baseClasses = highContrast 
     ? "bg-black border-2 border-yellow-400 text-white mb-4 shadow-none p-5"

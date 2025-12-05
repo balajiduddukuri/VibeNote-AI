@@ -7,9 +7,17 @@ import NoteCard from './components/NoteCard';
 import { BarChart, Bar, XAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, YAxis } from 'recharts';
 import { useGeminiLive } from './hooks/useGeminiLive';
 
+/**
+ * Character threshold to trigger automatic note analysis.
+ * We wait for a sufficient buffer size to generate meaningful insights.
+ */
 const AUTO_ANALYZE_THRESHOLD = 200; 
 
-// Simple audio feedback utility
+/**
+ * Audio Feedback Utility
+ * Generates simple synth beeps using the Web Audio API for UI interactions.
+ * Helps screen reader users and provides tactile feedback.
+ */
 const playFeedback = (type: 'click' | 'success' | 'on' | 'off') => {
     try {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
@@ -47,6 +55,10 @@ const playFeedback = (type: 'click' | 'success' | 'on' | 'off') => {
     }
 };
 
+/**
+ * Main Application Component.
+ * Orchestrates the UI, State, and the Gemini Live integration.
+ */
 export default function App() {
   // --- State ---
   const [notes, setNotes] = useState<OrganizedNote[]>([]);
@@ -67,12 +79,14 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // --- Hook ---
+  // The core logic for Gemini Live is encapsulated in this hook.
   const { 
     status, 
     segments, 
     currentTranscriptBuffer, 
     analyser, 
     errorMessage, 
+    isReconnecting, // Status flag for auto-retry
     connect, 
     disconnect, 
     setCurrentTranscriptBuffer,
@@ -86,6 +100,7 @@ export default function App() {
     audioConfig
   });
 
+  // Sync hook errors to local state for dismissal
   useEffect(() => {
     if (errorMessage) setLocalError(errorMessage);
   }, [errorMessage]);
@@ -100,6 +115,12 @@ export default function App() {
     scrollToBottom();
   }, [segments]);
 
+  /**
+   * "Ping Pong" Buffer Logic:
+   * 1. Takes the current accumulated buffer.
+   * 2. Sends it to Gemini Flash for summarization.
+   * 3. Clears the buffer (resets for new input).
+   */
   const handleGenerateInsight = useCallback(async () => {
     if (!process.env.API_KEY) return;
     if (currentTranscriptBuffer.length < 10) return;
@@ -115,12 +136,14 @@ export default function App() {
     setIsProcessingNotes(false);
   }, [currentTranscriptBuffer, setCurrentTranscriptBuffer]);
   
+  // Auto-trigger insight generation when threshold is reached
   useEffect(() => {
     if (currentTranscriptBuffer.length >= AUTO_ANALYZE_THRESHOLD && !isProcessingNotes) {
       handleGenerateInsight();
     }
   }, [currentTranscriptBuffer, isProcessingNotes, handleGenerateInsight]);
 
+  // Aggregate stats for the bar chart
   const chartData = useMemo(() => {
     return notes
       .flatMap(n => n.topics)
@@ -143,6 +166,7 @@ export default function App() {
   };
 
   // --- Theme Classes ---
+  // Dynamic class sets for High Contrast vs Default Dark Mode
   const theme = isHighContrast ? {
     bg: 'bg-black',
     text: 'text-white',
@@ -202,7 +226,15 @@ export default function App() {
           <section aria-labelledby="conn-heading" className="space-y-4">
             <h2 id="conn-heading" className={`text-xs font-bold uppercase tracking-wider ${theme.subText}`}>Connection</h2>
             
-            {localError && (
+            {/* Auto-Reconnect Indicator */}
+            {isReconnecting && (
+                 <div role="status" className="p-3 bg-yellow-900/30 border border-yellow-500 text-yellow-200 rounded-lg text-sm flex items-center gap-2 animate-pulse">
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Connection lost. Retrying...</span>
+                 </div>
+            )}
+            
+            {localError && !isReconnecting && (
               <div role="alert" className="p-3 bg-red-900/30 border border-red-500 text-red-200 rounded-lg text-sm flex items-start gap-2">
                 <AlertCircle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
                 <span className="flex-1">{localError}</span>

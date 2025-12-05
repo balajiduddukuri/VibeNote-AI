@@ -2,6 +2,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { OrganizedNote } from "../types";
 
 // Schema definition for the organizer
+// This enforces the Gemini model to return a strictly structured JSON object.
 const noteSchema = {
   type: Type.OBJECT,
   properties: {
@@ -31,6 +32,13 @@ const noteSchema = {
   required: ["title", "summary", "topics", "actionItems", "decisions", "sentiment"]
 };
 
+/**
+ * Analyzes a raw text transcript using Gemini Flash 2.5 and extracts structured business insights.
+ * 
+ * @param transcript - The raw text accumulated from the live session.
+ * @param apiKey - The Google Generative AI API Key.
+ * @returns A promise resolving to an OrganizedNote object or null if failed.
+ */
 export const organizeTranscript = async (transcript: string, apiKey: string): Promise<OrganizedNote | null> => {
   if (!apiKey || !transcript.trim()) return null;
 
